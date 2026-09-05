@@ -15,7 +15,7 @@ weekend — not to overclaim scope.
 - [x] Milestone 1 — task env + scripted expert data collection
 - [x] Milestone 2 — dataset + dataloader
 - [x] Milestone 3 — vision + language conditioning encoder
-- [ ] Milestone 4 — flow-matching action head
+- [x] Milestone 4 — flow-matching action head
 - [ ] Milestone 5 — training loop + sanity checks
 - [ ] Milestone 6 — inference: ODE sampling + action chunking
 - [ ] Milestone 7 — evaluation harness + metrics
@@ -156,3 +156,40 @@ Confirms: `cond` has the expected shape, an identical `(obs, instruction)`
 pair always gives the exact same cached embedding, and swapping the
 instruction while holding `obs` fixed measurably changes `cond` (L2 distance
 ~0.5, well above the epsilon) — conditioning is actually doing something.
+
+## Milestone 4 — Flow-matching action head
+
+`src/flow_policy/flow_matching.py` implements the linear (optimal-transport)
+conditional flow-matching path: `x0 ~ N(0,I)`, `t ~ U(0,1)`, `xt = (1-t)x0 +
+t*x1`, regress `v_theta(xt, t, cond)` toward `v_target = x1 - x0` via MSE;
+sample by Euler-integrating `dx/dt = v_theta` from `t=0` to `t=1`. `cond` is
+optional throughout, so the head is fully testable before it's wired to the
+real conditioning encoder.
+
+The reason this milestone matters: plain MSE-regression BC collapses
+multimodal target distributions to their mean, which for an actual bimodal
+target is a sample that never occurs. Flow matching's whole point is
+reproducing the distribution instead — so before touching real (messy,
+partially-successful) robot data, that claim is checked on a synthetic target
+where the right answer is known exactly.
+
+```bash
+uv run python scripts/test_flow_matching_bimodal.py
+```
+
+```
+fraction of samples near +2.0: 0.454
+fraction of samples near -2.0: 0.538
+fraction collapsed near the mean (0): 0.004
+
+PASS: samples are bimodal, not collapsed to the mean.
+```
+
+![bimodal test histogram](assets/flow_matching_bimodal_test.png)
+
+`x1` is +2 or -2 with equal probability (no conditioning). After 3000 training
+steps, 1000 Euler-sampled points from the learned model split ~45/54% between
+the two true modes with only 0.4% landing near the mean — the collapsed-mean
+failure mode a plain MSE regressor would produce. This is the milestone's
+proof of correctness; the head is only wired into the real task starting
+Milestone 5.
