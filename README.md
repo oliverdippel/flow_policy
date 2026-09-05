@@ -18,7 +18,7 @@ weekend — not to overclaim scope.
 - [x] Milestone 4 — flow-matching action head
 - [x] Milestone 5 — training loop + sanity checks
 - [x] Milestone 6 — inference: ODE sampling + action chunking
-- [ ] Milestone 7 — evaluation harness + metrics
+- [x] Milestone 7 — evaluation harness + metrics
 - [ ] Milestone 8 — ROS2 wrapper
 - [ ] Milestone 9 — README, video, polish
 
@@ -282,3 +282,49 @@ With a still-imperfect model, more frequent replanning means more chances for
 chunk-to-chunk sampling noise to interrupt a committed push; a better-trained
 model would likely narrow this gap. Kept the plan's specified `replan_every=4`
 as the default rather than quietly switching to whatever scored best.
+
+## Milestone 7 — Evaluation harness + metrics
+
+`scripts/evaluate.py` runs 25 rollouts per variant (distinct seeds from data
+collection and the M6 spot-checks) and reports: success rate (this project's
+position-only metric), mean time-to-success (first step the block came within
+30px of goal, among rollouts that ever got there), and the
+**instruction-confusion rate** — how often the block ended up closer to the
+*other* target than the one instructed. That last number is the point of
+having two variants at all: it checks conditioning actually steered the push,
+not just whether the policy can push competently.
+
+```bash
+uv run python scripts/evaluate.py
+```
+
+```
+[push to the left target]  (25 rollouts)
+  success rate:              0.28
+  mean final dist:           85.2px
+  mean env coverage:         0.15
+  mean time-to-success:      111.4 steps
+  never reached target:      0.72
+  instruction-confusion rate: 0.08
+
+[push to the right target]  (25 rollouts)
+  success rate:              0.08
+  mean final dist:           95.1px
+  mean env coverage:         0.19
+  mean time-to-success:      163.8 steps
+  never reached target:      0.80
+  instruction-confusion rate: 0.20
+```
+
+Full per-episode results in `assets/evaluation_results.json`.
+
+**Read this next to Milestone 6, not instead of it.** The single seeded
+rollouts there (16px / 48px final distance) were real, but one seed each is
+a demo, not a statistic — this N=25 harness is the real number, and it's
+considerably weaker: 28%/8% success. The confusion rate is the more
+encouraging piece of this: at 8% and 20%, most failures are the policy
+failing to land precisely on *either* target, not language conditioning
+routing the push to the wrong side — conditioning is doing its job even
+where low-level control isn't reliable yet. With a 200-episode dataset and
+a policy this size, this is a believable, honestly-reported result for a
+weekend-scoped project, not a solved task.

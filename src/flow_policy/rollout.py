@@ -24,12 +24,14 @@ from flow_policy.policy import FlowMatchingPolicy
 
 @dataclasses.dataclass
 class RolloutResult:
-    frames: list[np.ndarray]
+    frames: list[np.ndarray] | None
     num_steps: int
     final_position_dist: float
     final_coverage: float
     env_is_success: bool
     position_success: bool
+    final_block_centroid: np.ndarray
+    first_success_step: int | None  # first t at which the block was within the success radius, if ever
 
 
 class RecedingHorizonController:
@@ -87,6 +89,7 @@ def run_rollout(
     n_euler_steps: int = 10,
     temporal_ensemble: bool = False,
     position_success_radius: float = POSITION_SUCCESS_RADIUS,
+    render: bool = True,
 ) -> RolloutResult:
     env = make_variant_env(variant)
     obs, info = env.reset(seed=seed)
@@ -94,25 +97,32 @@ def run_rollout(
                                             temporal_ensemble=temporal_ensemble)
     controller.reset()
 
-    frames = [env.render()]
+    frames = [env.render()] if render else None
+    first_success_step = None
     for t in range(max_steps):
         action = controller.act(obs, variant.instruction, t)
         obs, reward, terminated, truncated, info = env.step(action)
-        frames.append(env.render())
+        if render:
+            frames.append(env.render())
+
+        centroid = block_centroid_world(obs[2:4], obs[4])
+        dist = float(np.linalg.norm(centroid - variant.goal_pose[:2]))
+        if first_success_step is None and dist <= position_success_radius:
+            first_success_step = t
+
         if terminated or truncated:
             break
     env.close()
 
-    centroid = block_centroid_world(obs[2:4], obs[4])
-    final_dist = float(np.linalg.norm(centroid - variant.goal_pose[:2]))
-
     return RolloutResult(
         frames=frames,
         num_steps=t + 1,
-        final_position_dist=final_dist,
+        final_position_dist=dist,
         final_coverage=float(info["coverage"]),
         env_is_success=bool(info["is_success"]),
-        position_success=final_dist <= position_success_radius,
+        position_success=dist <= position_success_radius,
+        final_block_centroid=centroid,
+        first_success_step=first_success_step,
     )
 
 
