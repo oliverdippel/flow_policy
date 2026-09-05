@@ -14,7 +14,7 @@ weekend — not to overclaim scope.
 - [x] Milestone 0 — environment setup
 - [x] Milestone 1 — task env + scripted expert data collection
 - [x] Milestone 2 — dataset + dataloader
-- [ ] Milestone 3 — vision + language conditioning encoder
+- [x] Milestone 3 — vision + language conditioning encoder
 - [ ] Milestone 4 — flow-matching action head
 - [ ] Milestone 5 — training loop + sanity checks
 - [ ] Milestone 6 — inference: ODE sampling + action chunking
@@ -124,3 +124,35 @@ never triggers the env's own 95%-coverage termination — see Milestone 1), a
 single random batch essentially never exercises the padding branch (only the
 last 7 of 300 timesteps trigger it), so it's verified separately by forcing
 `t = T-1` and checking the chunk equals the final action repeated 8 times.
+
+## Milestone 3 — Conditioning encoder
+
+`src/flow_policy/conditioning.py`:
+
+- `ObservationEncoder` — small MLP, `obs (5,) -> 64 -> 64`.
+- `InstructionEncoder` — frozen CLIP ViT-B-32 (`open_clip`, `openai` weights,
+  `quickgelu` variant to match how those weights were trained). Only the two
+  fixed instructions from `flow_policy.envs` ever appear, so both are embedded
+  once at construction and cached as a buffer — there's no CLIP forward pass
+  at training or inference time. An instruction outside that fixed set raises
+  `KeyError` rather than silently falling back to a live encode.
+- `ConditioningEncoder` — concatenates the two embeddings and projects to a
+  fixed-size `cond` vector (concatenation chosen over FiLM for simplicity —
+  FiLM would earn its keep more with a higher-capacity vision backbone than a
+  5-dim state vector).
+
+```bash
+uv run python scripts/test_conditioning.py
+```
+
+```
+CLIP text embedding L2 distance (left vs right): 2.802
+cond shape: (8, 128)
+cond L2 distance (left vs right instruction, same obs): [0.507, 0.504, ...]
+all conditioning encoder assertions passed.
+```
+
+Confirms: `cond` has the expected shape, an identical `(obs, instruction)`
+pair always gives the exact same cached embedding, and swapping the
+instruction while holding `obs` fixed measurably changes `cond` (L2 distance
+~0.5, well above the epsilon) — conditioning is actually doing something.
