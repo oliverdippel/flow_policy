@@ -13,7 +13,7 @@ weekend — not to overclaim scope.
 
 - [x] Milestone 0 — environment setup
 - [x] Milestone 1 — task env + scripted expert data collection
-- [ ] Milestone 2 — dataset + dataloader
+- [x] Milestone 2 — dataset + dataloader
 - [ ] Milestone 3 — vision + language conditioning encoder
 - [ ] Milestone 4 — flow-matching action head
 - [ ] Milestone 5 — training loop + sanity checks
@@ -91,3 +91,36 @@ drives straight through the centroid toward the goal. Circling first, rather
 than aiming straight at a "point behind the block," avoids cutting across the
 block from the wrong side and knocking it in a random direction — an earlier,
 naive version of this controller did exactly that and had a 0% success rate.
+
+## Milestone 2 — Dataset + dataloader
+
+`PushTChunkDataset` (`src/flow_policy/dataset.py`) loads all 200 episodes into
+memory and, per `__getitem__`, samples one episode and a random timestep `t`
+within it, returning that step's observation, the episode's instruction, and
+an `H=8` action chunk `actions[t : t+H]` (padded by repeating the final action
+if the episode ends first).
+
+```bash
+uv run python scripts/inspect_batch.py
+```
+
+```
+dataset has 200 episodes
+observation: shape=(16, 5) dtype=torch.float32
+instruction: list of 16 strings, e.g. 'push to the left target'
+action_chunk: shape=(16, 8, 2) dtype=torch.float32
+shape assertions passed.
+
+spot-check: batch obs matched ep_00060_v0.npz at timestep t=100
+  ...
+spot-check passed: action_chunk exactly matches actions[t : t+H] from the source episode.
+```
+
+The spot-check re-locates the sampled observation in its source `.npz` file
+and confirms the returned action chunk is byte-for-byte `actions[t:t+H]` —
+catches off-by-one indexing bugs directly rather than trusting shapes alone.
+Since every collected episode runs the full 300 steps (the scripted expert
+never triggers the env's own 95%-coverage termination — see Milestone 1), a
+single random batch essentially never exercises the padding branch (only the
+last 7 of 300 timesteps trigger it), so it's verified separately by forcing
+`t = T-1` and checking the chunk equals the final action repeated 8 times.
