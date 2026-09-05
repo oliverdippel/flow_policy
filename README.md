@@ -16,7 +16,7 @@ weekend — not to overclaim scope.
 - [x] Milestone 2 — dataset + dataloader
 - [x] Milestone 3 — vision + language conditioning encoder
 - [x] Milestone 4 — flow-matching action head
-- [ ] Milestone 5 — training loop + sanity checks
+- [x] Milestone 5 — training loop + sanity checks
 - [ ] Milestone 6 — inference: ODE sampling + action chunking
 - [ ] Milestone 7 — evaluation harness + metrics
 - [ ] Milestone 8 — ROS2 wrapper
@@ -193,3 +193,39 @@ the two true modes with only 0.4% landing near the mean — the collapsed-mean
 failure mode a plain MSE regressor would produce. This is the milestone's
 proof of correctness; the head is only wired into the real task starting
 Milestone 5.
+
+## Milestone 5 — Training loop + sanity checks
+
+`src/flow_policy/policy.py` ties the conditioning encoder and flow-matching
+head into `FlowMatchingPolicy`, and adds an `EMA` helper (decay 0.999) for a
+smoothed copy of the weights to use at inference. One catch found here:
+PushT's action space is raw pixel coordinates in `[0, 512]`, and flow matching
+interpolates actions against `N(0,1)` noise — feeding in unnormalized actions
+made the regression target's scale ~500x too large (loss ~80000 instead of
+~1). Fixed by rescaling actions to `[-1, 1]` using the environment's known,
+fixed bounds (`normalize_action` / `denormalize_action` in `policy.py`) before
+they ever reach the flow-matching head.
+
+`scripts/train.py` wires in the dataset (M2): each batch computes `cond` from
+`(observation, instruction)`, samples `t` and `x0`, computes the flow-matching
+loss, backprops with grad-norm clipping (max 1.0), steps Adam (lr 2e-4), and
+updates the EMA copy. Checkpoints (model + EMA state) saved every 50 epochs.
+
+```bash
+uv run python scripts/train.py
+```
+
+```
+dataset: 200 episodes, 6 batches/epoch, batch_size=32
+epoch    0  loss 1.1895
+epoch   50  loss 0.9287
+epoch  100  loss 0.6077
+epoch  150  loss 0.4325
+epoch  199  loss 0.3240
+```
+
+![training loss curve](assets/training_loss.png)
+
+Loss drops from ~1.19 to ~0.32 over 200 epochs with no NaNs and no
+exploding-loss spikes, and is visibly flattening out by the end. Checkpoints
+land in `checkpoints/` (gitignored — retrain with the command above).
