@@ -9,6 +9,101 @@ engineering decisions (conditioning, multimodal action generation, action
 chunking, deployment plumbing) at a scale that's actually verifiable in a
 weekend — not to overclaim scope.
 
+## At a glance
+
+A CLIP-conditioned flow-matching policy learns to push a T-shaped block to
+one of two named targets on the PushT board, from 200 scripted-expert
+demonstrations, entirely on CPU.
+
+| | |
+|---|---|
+| **Proof the flow-matching head works at all** | On a synthetic bimodal target (`x1 = +-2`), sampled points split ~45/54% across the true modes with 0.4% collapsed to the mean — the exact failure mode plain MSE regression has ([Milestone 4](#milestone-4--flow-matching-action-head)). |
+| **Real closed-loop rollouts** | Seeded spot-checks push the block to the correct target with visible, deliberate motion ([Milestone 6](#milestone-6--inference-ode-sampling--action-chunking)). |
+| **Real evaluation numbers (N=25/variant)** | Success 28% (left) / 8% (right); instruction-confusion only 8%/20% — most failures are imprecise landing, not the language routing to the wrong side ([Milestone 7](#milestone-7--evaluation-harness--metrics)). |
+
+![left target rollout](assets/rollout_push_to_the_left_target.gif)
+![right target rollout](assets/rollout_push_to_the_right_target.gif)
+
+### Architecture
+
+```
+instruction (str) --> frozen CLIP text encoder --> cached embed (512) --\
+                                                                          >--> concat --> proj --> cond (128)
+state obs (5,)    --> small MLP encoder --> obs embed (64) -------------/                              |
+                                                                                                          v
+noise x0 ~ N(0,I) (16,) --\                                                              v_theta(xt, t, cond)
+                            >--> xt = (1-t)x0 + t*x1 -------------------------------------> (MLP, predicts velocity)
+ground truth x1 (16,) ----/                                                                              |
+                                                                                                          v
+                                                          Euler-integrate dx/dt = v_theta, t: 0 -> 1, 10 steps
+                                                                                                          |
+                                                                                                          v
+                                                        action chunk (H=8, 2) --> receding horizon (execute 4, replan)
+                                                                                                          |
+                                                                                                          v
+                                                                                            gym-pusht env / ROS2 topics
+```
+
+`x1` is a flattened `H=8`-step action chunk (`16` = `8*2`); training samples
+`t` and `x0` fresh per example and regresses `v_theta` toward `x1 - x0` via
+MSE — see [Milestone 4](#milestone-4--flow-matching-action-head)
+for why this reproduces multimodal action distributions instead of averaging
+them away.
+
+### Reproduce
+
+```bash
+uv sync
+uv run python scripts/smoke_test_env.py     # M0: sanity-check the env
+uv run python scripts/collect_data.py       # M1: 200 scripted-expert episodes
+uv run python scripts/inspect_batch.py      # M2: dataset shape/index checks
+uv run python scripts/test_conditioning.py  # M3: conditioning encoder unit test
+uv run python scripts/test_flow_matching_bimodal.py  # M4: bimodal proof-of-correctness
+uv run python scripts/train.py              # M5: train (10000 epochs, ~2 min on CPU)
+uv run python scripts/rollout.py            # M6: closed-loop rollout -> GIFs
+uv run python scripts/evaluate.py           # M7: N=25/variant evaluation harness
+```
+
+### What I'd do with more time or compute
+
+- **Fix the scripted expert's blind spot.** It only pushes toward the goal
+  *position* and never corrects the block's rotation, which is why this
+  project's whole success metric had to be redefined around position only
+  ([Milestone 1](#milestone-1--task-variants--scripted-expert--data-collection)).
+  A real rotate-then-translate controller (or just more scripted-expert
+  engineering time) would let the eval use PushT's actual 95%-coverage
+  criterion instead of a relaxed one.
+- **More demonstrations and a bigger model.** 200 episodes and a small MLP
+  action head got real but modest closed-loop success (28%/8%); this is
+  the single biggest lever on the Milestone 7 numbers.
+- **Pixel observations + a real vision backbone.** The plan's low-dim-state
+  path was the right first cut for a weekend, but a small CNN (or a frozen
+  pretrained backbone) over the 96x96 RGB observation is the natural next
+  step, and would make FiLM conditioning (instead of concatenation) worth
+  its complexity.
+- **A harder, genuinely multimodal real task.** The two PushT variants prove
+  conditioning routes correctly, but neither one actually needs multimodal
+  action generation to solve — the synthetic bimodal test is still the only
+  place this project demonstrates *why* flow matching over MSE regression.
+  A task with real left/right/either-works ambiguity at a single state would
+  make that case on real data, not just a toy target.
+- **Tune the receding-horizon/temporal-ensembling tradeoff properly.**
+  Milestone 6 found that committing to the full 8-step chunk beat the plan's
+  specified 4-step replanning on the current checkpoint — worth revisiting
+  once the underlying policy is stronger, rather than as a workaround for it.
+- **Actually run the Milestone 8 ROS2 nodes** against a real ROS2 install
+  rather than a syntax-checked, never-executed stub.
+
+A scope note in the same spirit: the plan's own budget was ~800 lines of
+code total; this repo is at ~1490 (`src/flow_policy` + `scripts` +
+`ros2_nodes`), including a 9-way milestone split where each gets its own
+argparse-CLI script, and ~160 lines of never-executed ROS2 stub. The
+scripted expert itself went through several rewritten strategies while
+debugging Milestone 1 (see that section for why), but only the final,
+working version — 83 lines — is in the repo; the throwaway tuning scripts
+were deleted once they'd done their job. Noting the overage rather than
+quietly not mentioning it.
+
 ## Status
 
 - [x] Milestone 0 — environment setup
@@ -20,7 +115,7 @@ weekend — not to overclaim scope.
 - [x] Milestone 6 — inference: ODE sampling + action chunking
 - [x] Milestone 7 — evaluation harness + metrics
 - [~] Milestone 8 — ROS2 wrapper (documented stub, not run — see below)
-- [ ] Milestone 9 — README, video, polish
+- [x] Milestone 9 — README, video, polish
 
 ## Milestone 0 — Environment setup
 
