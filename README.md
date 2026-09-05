@@ -17,7 +17,7 @@ weekend — not to overclaim scope.
 - [x] Milestone 3 — vision + language conditioning encoder
 - [x] Milestone 4 — flow-matching action head
 - [x] Milestone 5 — training loop + sanity checks
-- [ ] Milestone 6 — inference: ODE sampling + action chunking
+- [x] Milestone 6 — inference: ODE sampling + action chunking
 - [ ] Milestone 7 — evaluation harness + metrics
 - [ ] Milestone 8 — ROS2 wrapper
 - [ ] Milestone 9 — README, video, polish
@@ -218,14 +218,67 @@ uv run python scripts/train.py
 ```
 dataset: 200 episodes, 6 batches/epoch, batch_size=32
 epoch    0  loss 1.1895
-epoch   50  loss 0.9287
-epoch  100  loss 0.6077
-epoch  150  loss 0.4325
-epoch  199  loss 0.3240
+epoch 2000  loss ~0.25
+epoch 6000  loss ~0.20
+epoch 9999  loss 0.1637
 ```
 
 ![training loss curve](assets/training_loss.png)
 
-Loss drops from ~1.19 to ~0.32 over 200 epochs with no NaNs and no
-exploding-loss spikes, and is visibly flattening out by the end. Checkpoints
-land in `checkpoints/` (gitignored — retrain with the command above).
+**Correction, found while building Milestone 6:** this originally ran for 200
+epochs (~1200 gradient steps), and the loss curve alone looked fine — smooth
+and decreasing. But feeding a real held-out state through the trained model
+and comparing its predicted action chunk to the expert's showed pure noise
+(predicted coordinates like `597, -46` — outside the board entirely), and
+closed-loop rollouts just drove the agent to wander while the block sat at
+its spawn point untouched. Loss trending down is not the same as samples
+being any good; only checking actual samples caught it. Retrained for 10,000
+epochs (still ~2 minutes on CPU — this model is tiny): loss drops from ~1.19
+to ~0.16 and visibly plateaus by epoch ~2000 (the flow-matching loss has an
+irreducible noise floor even for a perfect model, since the regression target
+`x1 - x0` depends on a freshly-sampled `x0` every time, so a flat noisy tail
+doesn't necessarily mean further training wouldn't help — see Milestone 6 for
+the sample-quality check that confirmed this level was actually usable).
+Checkpoints land in `checkpoints/` (gitignored — retrain with the command
+above).
+
+## Milestone 6 — Inference: ODE sampling + action chunking
+
+`src/flow_policy/rollout.py`'s `RecedingHorizonController`: each planning call
+samples a full 8-step action chunk from the EMA-weight policy (Euler ODE,
+10 steps), but only executes the first `replan_every=4` actions before
+re-observing and re-predicting — committing blindly to the full chunk would
+ignore how much the block can drift from the plan over 8 steps. An optional
+temporal-ensembling mode blends overlapping chunks (a chunk generated
+`replan_every` steps ago still covers the newest chunk's steps, just at a
+larger in-chunk offset), weighted down by how stale that prediction is.
+
+```bash
+uv run python scripts/rollout.py
+```
+
+```
+[push to the left target] position_success=True (dist=16.1px) env_coverage=0.16
+[push to the right target] position_success=False (dist=48.4px) env_coverage=0.52
+```
+
+![left target rollout](assets/rollout_push_to_the_left_target.gif)
+![right target rollout](assets/rollout_push_to_the_right_target.gif)
+
+Both rollouts show real, deliberate pushing (confirmed by inspecting frames
+across the episode, not just the final one) — the agent circles to the far
+side of the block and drives it toward the correct target, not a coincidence
+of where the block happened to spawn. Left-target reaches this project's
+position-success bar; right-target gets close (48px, just outside the 30px
+radius) with substantial coverage. One seed each is a spot-check, not a
+statistic — Milestone 7 runs 20-30 rollouts per variant for the real numbers.
+
+**A responsiveness/smoothness tradeoff worth noting:** the plan specifies
+replanning every 4 of the 8 predicted steps, which is what's used above. In
+side-by-side testing, committing to the *full* 8-step chunk before replanning
+(`--replan-every 8`) did better on this checkpoint (both variants under the
+30px bar), and temporal ensembling with `--replan-every 4` landed in between.
+With a still-imperfect model, more frequent replanning means more chances for
+chunk-to-chunk sampling noise to interrupt a committed push; a better-trained
+model would likely narrow this gap. Kept the plan's specified `replan_every=4`
+as the default rather than quietly switching to whatever scored best.

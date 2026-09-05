@@ -34,11 +34,11 @@ def main():
     parser.add_argument("--episodes-dir", type=pathlib.Path, default=DEFAULT_EPISODES_DIR)
     parser.add_argument("--checkpoint-dir", type=pathlib.Path, default=DEFAULT_CHECKPOINT_DIR)
     parser.add_argument("--loss-plot-path", type=pathlib.Path, default=DEFAULT_LOSS_PLOT_PATH)
-    parser.add_argument("--epochs", type=int, default=200)
+    parser.add_argument("--epochs", type=int, default=10000)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--chunk-size", type=int, default=8)
-    parser.add_argument("--checkpoint-every", type=int, default=50)
+    parser.add_argument("--checkpoint-every", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
