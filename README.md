@@ -19,7 +19,7 @@ weekend — not to overclaim scope.
 - [x] Milestone 5 — training loop + sanity checks
 - [x] Milestone 6 — inference: ODE sampling + action chunking
 - [x] Milestone 7 — evaluation harness + metrics
-- [ ] Milestone 8 — ROS2 wrapper
+- [~] Milestone 8 — ROS2 wrapper (documented stub, not run — see below)
 - [ ] Milestone 9 — README, video, polish
 
 ## Milestone 0 — Environment setup
@@ -328,3 +328,30 @@ routing the push to the wrong side — conditioning is doing its job even
 where low-level control isn't reliable yet. With a 200-episode dataset and
 a policy this size, this is a believable, honestly-reported result for a
 weekend-scoped project, not a solved task.
+
+## Milestone 8 — ROS2 wrapper (documented stub, not run)
+
+No ROS2 in this environment: no `ros2` CLI, no `/opt/ros`, `ROS_DISTRO`
+unset, and `import rclpy` fails in both the system Python and the project's
+venv. Per the plan's own guidance for this case, the intended design is
+documented here with real code (`ros2_nodes/policy_node.py`,
+`ros2_nodes/pusht_bridge.py`) rather than skipped silently — but neither
+file has been executed or even successfully imported, since `rclpy` isn't
+installed. Treat them as a design document with code in it, not a tested
+artifact.
+
+- **`policy_node.py`** subscribes to `/pusht/observation`
+  (`Float32MultiArray`, the 5-dim state) and `/pusht/instruction`
+  (`String`), runs Milestone 6's `RecedingHorizonController` internally
+  (same replanning logic as the Python-only rollout — this node is a
+  transport layer around it, not a second implementation), and publishes to
+  `/pusht/action` (`Float32MultiArray`) at 10Hz.
+- **`pusht_bridge.py`** owns a live `gym-pusht` env, publishes the current
+  observation and instruction, and steps the env each time an action
+  arrives on `/pusht/action` — so a real run would prove the full loop
+  (env → topic → policy → topic → env) running through ROS2 message
+  passing, not just direct Python calls.
+
+If ROS2 becomes available: `ros2 run` both nodes (or a launch file starting
+both), and the action topic should visibly publish in response to the
+observation topic, with `pusht_bridge.py`'s logger showing episode resets.
