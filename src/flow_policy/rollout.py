@@ -2,15 +2,24 @@
 
 Each planning call predicts a full `chunk_size`-step action chunk via the
 flow-matching head's Euler sampler, but only the first `replan_every` actions
-are executed before re-observing and re-predicting -- committing to the full
-chunk blindly would ignore how much the world can drift from the plan over a
-whole chunk's horizon.
+are executed before re-observing and re-predicting -- unless `replan_every`
+equals the chunk size, in which case this degenerates to committing to the
+full chunk before replanning at all.
 
-Optional temporal ensembling: when replanning, several recently-generated
-chunks still overlap (chunk generated `replan_every` steps ago also covers
-the steps the newest chunk covers, just at a larger in-chunk offset). Blending
-the overlapping predictions -- weighting a prediction down the more steps old
-its plan is -- trades a bit of responsiveness for smoother actions.
+Default is `replan_every = chunk_size` (full commit): the plan this project
+followed specifies replanning every 4 of 8 steps on the theory that more
+frequent replanning better tracks drift from the plan, but empirically (see
+README, Milestone 6/10) more frequent replanning let a still-imperfect
+model's chunk-to-chunk sampling noise interrupt otherwise-good pushes more
+often than it corrected for drift. Pass a smaller `replan_every` to get the
+originally-specified behavior.
+
+Optional temporal ensembling: when replanning more often than once per
+chunk, several recently-generated chunks still overlap (a chunk generated
+`replan_every` steps ago also covers the steps the newest chunk covers, just
+at a larger in-chunk offset). Blending the overlapping predictions --
+weighting a prediction down the more steps old its plan is -- trades a bit
+of responsiveness for smoother actions.
 """
 
 import dataclasses
@@ -38,13 +47,13 @@ class RecedingHorizonController:
     def __init__(
         self,
         policy: FlowMatchingPolicy,
-        replan_every: int = 4,
+        replan_every: int | None = None,
         n_euler_steps: int = 10,
         temporal_ensemble: bool = False,
         ensemble_decay: float = 0.5,
     ):
         self.policy = policy
-        self.replan_every = replan_every
+        self.replan_every = replan_every if replan_every is not None else policy.chunk_size
         self.n_euler_steps = n_euler_steps
         self.temporal_ensemble = temporal_ensemble
         self.ensemble_decay = ensemble_decay
@@ -85,7 +94,7 @@ def run_rollout(
     variant: TaskVariant,
     seed: int,
     max_steps: int = 300,
-    replan_every: int = 4,
+    replan_every: int | None = None,
     n_euler_steps: int = 10,
     temporal_ensemble: bool = False,
     position_success_radius: float = POSITION_SUCCESS_RADIUS,
@@ -128,7 +137,11 @@ def run_rollout(
 
 def load_policy_from_checkpoint(checkpoint_path, instructions: list[str]) -> FlowMatchingPolicy:
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    policy = FlowMatchingPolicy(instructions, chunk_size=checkpoint["chunk_size"])
+    policy = FlowMatchingPolicy(
+        instructions,
+        chunk_size=checkpoint["chunk_size"],
+        **checkpoint.get("model_kwargs", {}),  # hidden_dim/num_hidden_layers etc., if the checkpoint recorded them
+    )
     policy.load_state_dict(checkpoint["ema_state_dict"])
     policy.eval()
     return policy

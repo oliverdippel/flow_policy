@@ -12,14 +12,14 @@ weekend — not to overclaim scope.
 ## At a glance
 
 A CLIP-conditioned flow-matching policy learns to push a T-shaped block to
-one of two named targets on the PushT board, from 200 scripted-expert
+one of two named targets on the PushT board, from 800 scripted-expert
 demonstrations, entirely on CPU.
 
 | | |
 |---|---|
 | **Proof the flow-matching head works at all** | On a synthetic bimodal target (`x1 = +-2`), sampled points split ~45/54% across the true modes with 0.4% collapsed to the mean — the exact failure mode plain MSE regression has ([Milestone 4](#milestone-4--flow-matching-action-head)). |
 | **Real closed-loop rollouts** | Seeded spot-checks push the block to the correct target with visible, deliberate motion ([Milestone 6](#milestone-6--inference-ode-sampling--action-chunking)). |
-| **Real evaluation numbers (N=25/variant)** | Success 28% (left) / 8% (right); instruction-confusion only 8%/20% — most failures are imprecise landing, not the language routing to the wrong side ([Milestone 7](#milestone-7--evaluation-harness--metrics)). |
+| **Real evaluation numbers (N=25/variant)** | Success 76% (left) / 64% (right); instruction-confusion 0% on both — see [Performance iteration](#performance-iteration-post-milestone-9) for how these numbers moved from an initial 28%/8%. |
 
 ![left target rollout](assets/rollout_push_to_the_left_target.gif)
 ![right target rollout](assets/rollout_push_to_the_right_target.gif)
@@ -55,11 +55,11 @@ them away.
 ```bash
 uv sync
 uv run python scripts/smoke_test_env.py     # M0: sanity-check the env
-uv run python scripts/collect_data.py       # M1: 200 scripted-expert episodes
+uv run python scripts/collect_data.py       # M1: 800 scripted-expert episodes
 uv run python scripts/inspect_batch.py      # M2: dataset shape/index checks
 uv run python scripts/test_conditioning.py  # M3: conditioning encoder unit test
 uv run python scripts/test_flow_matching_bimodal.py  # M4: bimodal proof-of-correctness
-uv run python scripts/train.py              # M5: train (10000 epochs, ~2 min on CPU)
+uv run python scripts/train.py              # M5: train (8000 epochs, ~27 min on CPU)
 uv run python scripts/rollout.py            # M6: closed-loop rollout -> GIFs
 uv run python scripts/evaluate.py           # M7: N=25/variant evaluation harness
 ```
@@ -72,10 +72,10 @@ uv run python scripts/evaluate.py           # M7: N=25/variant evaluation harnes
   ([Milestone 1](#milestone-1--task-variants--scripted-expert--data-collection)).
   A real rotate-then-translate controller (or just more scripted-expert
   engineering time) would let the eval use PushT's actual 95%-coverage
-  criterion instead of a relaxed one.
-- **More demonstrations and a bigger model.** 200 episodes and a small MLP
-  action head got real but modest closed-loop success (28%/8%); this is
-  the single biggest lever on the Milestone 7 numbers.
+  criterion instead of a relaxed one — this is still true even after the
+  [performance iteration](#performance-iteration-post-milestone-9) below;
+  the env-native success rate is still 0% throughout, only this project's
+  position-only metric moved.
 - **Pixel observations + a real vision backbone.** The plan's low-dim-state
   path was the right first cut for a weekend, but a small CNN (or a frozen
   pretrained backbone) over the 96x96 RGB observation is the natural next
@@ -87,15 +87,14 @@ uv run python scripts/evaluate.py           # M7: N=25/variant evaluation harnes
   place this project demonstrates *why* flow matching over MSE regression.
   A task with real left/right/either-works ambiguity at a single state would
   make that case on real data, not just a toy target.
-- **Tune the receding-horizon/temporal-ensembling tradeoff properly.**
-  Milestone 6 found that committing to the full 8-step chunk beat the plan's
-  specified 4-step replanning on the current checkpoint — worth revisiting
-  once the underlying policy is stronger, rather than as a workaround for it.
+- **More eval seeds.** N=25/variant is small enough that the confusion rate
+  hitting exactly 0% on both variants could plausibly move with more seeds;
+  worth confirming it holds at N=100+ before leaning on it too hard.
 - **Actually run the Milestone 8 ROS2 nodes** against a real ROS2 install
   rather than a syntax-checked, never-executed stub.
 
 A scope note in the same spirit: the plan's own budget was ~800 lines of
-code total; this repo is at ~1490 (`src/flow_policy` + `scripts` +
+code total; this repo is at ~1520 (`src/flow_policy` + `scripts` +
 `ros2_nodes`), including a 9-way milestone split where each gets its own
 argparse-CLI script, and ~160 lines of never-executed ROS2 stub. The
 scripted expert itself went through several rewritten strategies while
@@ -116,6 +115,53 @@ quietly not mentioning it.
 - [x] Milestone 7 — evaluation harness + metrics
 - [~] Milestone 8 — ROS2 wrapper (documented stub, not run — see below)
 - [x] Milestone 9 — README, video, polish
+
+## Performance iteration (post-Milestone 9)
+
+The Milestone 7 numbers (28% / 8% success) were honestly reported but weak,
+and weren't good enough as a final result. Three changes, cheapest first:
+
+1. **Switched the default `replan_every` from 4 to the full chunk size (8)**
+   — i.e. commit to the whole predicted chunk before replanning, instead of
+   replanning every 4 of 8 steps as the plan originally specified. Free (no
+   retraining): on the Milestone 7 checkpoint this alone moved average
+   success from 18% to 26%, at the cost of a worse confusion rate on one
+   variant (8%→24% on left, 20%→12% on right) — a real but mixed win, not a
+   clean one.
+2. **Recollected a bigger dataset**: 200 → 800 episodes (400/variant instead
+   of 100). While doing this, `collect_data.py` turned out to have a real
+   bug: episode filenames are `ep_{index}_{variant}.npz` with `index`
+   assigned sequentially across both variants, so the same index can land on
+   a different variant across two runs with different `--episodes-per-variant`
+   values — old files then don't get overwritten, they pile up alongside the
+   new ones. Training briefly ran on a 900-file dataset that silently included
+   100 duplicate episodes from the original 200-episode run (harmless in
+   content, but a real hygiene bug and a reproducibility risk). Fixed by
+   clearing the output directory at the start of every collection run, then
+   recollected and retrained clean.
+3. **Bigger model**: the flow-matching MLP's hidden width/depth went from
+   256/3 layers to 512/4. Trained 8000 epochs on the clean 800-episode
+   dataset (~27 minutes on CPU — still cheap, just no longer near-instant).
+
+| metric | Milestone 7 (200 ep, small model, replan=4) | after (800 ep, bigger model, replan=8) |
+|---|---|---|
+| success rate (left / right) | 28% / 8% | **76% / 64%** |
+| instruction-confusion rate | 8% / 20% | **0% / 0%** |
+| mean final distance | 85px / 95px | 29px / 29px |
+| final training loss | ~0.16 | ~0.10 |
+
+Re-verified with contact sheets (frames sampled across each episode, not
+just the last one) that this is genuine pushing from far-away spawns, not a
+statistical artifact of lucky initial block placement. The rollout GIFs and
+`assets/evaluation_results.json` at the top of this README are from this
+final checkpoint, not the original Milestone 7 run.
+
+One number that *didn't* move: the environment's own native 95%-coverage
+success rate is still 0% throughout all of this. Every change here targeted
+getting the block to the right *position* more reliably; none of it touches
+the scripted expert's inability to control the block's final *rotation*
+(Milestone 1), which is the actual gap between this project's relaxed
+success metric and PushT's real one.
 
 ## Milestone 0 — Environment setup
 
@@ -168,15 +214,19 @@ uv run python scripts/collect_data.py
 ```
 
 ```
-[push to the left target] 100 episodes -- position-success rate: 0.67 (radius=30.0px), mean env coverage: 0.34
-[push to the right target] 100 episodes -- position-success rate: 0.74 (radius=30.0px), mean env coverage: 0.32
+[push to the left target] 400 episodes -- position-success rate: 0.69 (radius=30.0px), mean env coverage: 0.32
+[push to the right target] 400 episodes -- position-success rate: 0.66 (radius=30.0px), mean env coverage: 0.29
 ```
 
-200 episodes (100/variant), randomized initial agent/block poses, saved to
+800 episodes (400/variant — bumped from 100/variant during the
+[performance iteration](#performance-iteration-post-milestone-9), same rates
+either way), randomized initial agent/block poses, saved to
 `data/episodes/ep_XXXXX_vN.npz` (gitignored — regenerate with the command
-above). Each file: `observations (T, 5)`, `actions (T, 2)`, `variant_id`,
-`instruction`, `position_success`, `final_position_dist`, `final_coverage`,
-`env_is_success`.
+above; it clears the directory first, since re-running with a different
+`--episodes-per-variant` used to leave stale orphaned files behind — see the
+performance-iteration section). Each file: `observations (T, 5)`,
+`actions (T, 2)`, `variant_id`, `instruction`, `position_success`,
+`final_position_dist`, `final_coverage`, `env_is_success`.
 
 The scripted expert (`src/flow_policy/expert.py`) circles around the block's
 true centroid (recovered from the body-origin state via a fixed local-frame
@@ -189,7 +239,7 @@ naive version of this controller did exactly that and had a 0% success rate.
 
 ## Milestone 2 — Dataset + dataloader
 
-`PushTChunkDataset` (`src/flow_policy/dataset.py`) loads all 200 episodes into
+`PushTChunkDataset` (`src/flow_policy/dataset.py`) loads all episodes into
 memory and, per `__getitem__`, samples one episode and a random timestep `t`
 within it, returning that step's observation, the episode's instruction, and
 an `H=8` action chunk `actions[t : t+H]` (padded by repeating the final action
@@ -200,13 +250,13 @@ uv run python scripts/inspect_batch.py
 ```
 
 ```
-dataset has 200 episodes
+dataset has 800 episodes
 observation: shape=(16, 5) dtype=torch.float32
 instruction: list of 16 strings, e.g. 'push to the left target'
 action_chunk: shape=(16, 8, 2) dtype=torch.float32
 shape assertions passed.
 
-spot-check: batch obs matched ep_00060_v0.npz at timestep t=100
+spot-check: batch obs matched ep_00318_v0.npz at timestep t=280
   ...
 spot-check passed: action_chunk exactly matches actions[t : t+H] from the source episode.
 ```
@@ -304,57 +354,58 @@ they ever reach the flow-matching head.
 `scripts/train.py` wires in the dataset (M2): each batch computes `cond` from
 `(observation, instruction)`, samples `t` and `x0`, computes the flow-matching
 loss, backprops with grad-norm clipping (max 1.0), steps Adam (lr 2e-4), and
-updates the EMA copy. Checkpoints (model + EMA state) saved every 50 epochs.
+updates the EMA copy. Checkpoints (model + EMA state, plus the model's own
+capacity kwargs so a checkpoint always reloads with the exact architecture it
+was trained with) saved periodically.
 
 ```bash
 uv run python scripts/train.py
 ```
 
 ```
-dataset: 200 episodes, 6 batches/epoch, batch_size=32
-epoch    0  loss 1.1895
-epoch 2000  loss ~0.25
-epoch 6000  loss ~0.20
-epoch 9999  loss 0.1637
+dataset: 800 episodes, 25 batches/epoch, batch_size=32
+epoch    0  loss ~1.1
+epoch 2000  loss ~0.14
+epoch 6000  loss ~0.10
+epoch 7999  loss 0.1035
 ```
 
 ![training loss curve](assets/training_loss.png)
 
 **Correction, found while building Milestone 6:** this originally ran for 200
-epochs (~1200 gradient steps), and the loss curve alone looked fine — smooth
-and decreasing. But feeding a real held-out state through the trained model
-and comparing its predicted action chunk to the expert's showed pure noise
-(predicted coordinates like `597, -46` — outside the board entirely), and
-closed-loop rollouts just drove the agent to wander while the block sat at
-its spawn point untouched. Loss trending down is not the same as samples
-being any good; only checking actual samples caught it. Retrained for 10,000
-epochs (still ~2 minutes on CPU — this model is tiny): loss drops from ~1.19
-to ~0.16 and visibly plateaus by epoch ~2000 (the flow-matching loss has an
-irreducible noise floor even for a perfect model, since the regression target
-`x1 - x0` depends on a freshly-sampled `x0` every time, so a flat noisy tail
-doesn't necessarily mean further training wouldn't help — see Milestone 6 for
-the sample-quality check that confirmed this level was actually usable).
-Checkpoints land in `checkpoints/` (gitignored — retrain with the command
-above).
+epochs (~1200 gradient steps) on a 200-episode dataset, and the loss curve
+alone looked fine — smooth and decreasing. But feeding a real held-out state
+through the trained model and comparing its predicted action chunk to the
+expert's showed pure noise (predicted coordinates like `597, -46` — outside
+the board entirely), and closed-loop rollouts just drove the agent to wander
+while the block sat at its spawn point untouched. Loss trending down is not
+the same as samples being any good; only checking actual samples caught it.
+Retrained for 10,000 epochs, which fixed it (loss ~1.19 → ~0.16, visibly
+plateauing) — full details on that first fix are in the git history. The
+numbers and config above are from a second round of training, described in
+[Performance iteration](#performance-iteration-post-milestone-9): 800
+episodes (not 200) and a bigger model (512-hidden/4-layer, not
+256/3-layer), 8000 epochs, final loss ~0.10. Checkpoints land in
+`checkpoints/` (gitignored — retrain with the command above; ~27 minutes
+on CPU at this size, not the ~2 minutes the original smaller run took).
 
 ## Milestone 6 — Inference: ODE sampling + action chunking
 
 `src/flow_policy/rollout.py`'s `RecedingHorizonController`: each planning call
 samples a full 8-step action chunk from the EMA-weight policy (Euler ODE,
-10 steps), but only executes the first `replan_every=4` actions before
-re-observing and re-predicting — committing blindly to the full chunk would
-ignore how much the block can drift from the plan over 8 steps. An optional
-temporal-ensembling mode blends overlapping chunks (a chunk generated
-`replan_every` steps ago still covers the newest chunk's steps, just at a
-larger in-chunk offset), weighted down by how stale that prediction is.
+10 steps), then executes some number of those actions before re-observing
+and re-predicting. An optional temporal-ensembling mode blends overlapping
+chunks (a chunk generated `replan_every` steps ago still covers the newest
+chunk's steps, just at a larger in-chunk offset), weighted down by how stale
+that prediction is.
 
 ```bash
 uv run python scripts/rollout.py
 ```
 
 ```
-[push to the left target] position_success=True (dist=16.1px) env_coverage=0.16
-[push to the right target] position_success=False (dist=48.4px) env_coverage=0.52
+[push to the left target] position_success=True (dist=5.8px) env_coverage=0.34
+[push to the right target] position_success=True (dist=11.8px) env_coverage=0.49
 ```
 
 ![left target rollout](assets/rollout_push_to_the_left_target.gif)
@@ -363,20 +414,23 @@ uv run python scripts/rollout.py
 Both rollouts show real, deliberate pushing (confirmed by inspecting frames
 across the episode, not just the final one) — the agent circles to the far
 side of the block and drives it toward the correct target, not a coincidence
-of where the block happened to spawn. Left-target reaches this project's
-position-success bar; right-target gets close (48px, just outside the 30px
-radius) with substantial coverage. One seed each is a spot-check, not a
-statistic — Milestone 7 runs 20-30 rollouts per variant for the real numbers.
+of where the block happened to spawn. One seed each is a spot-check, not a
+statistic — Milestone 7 runs N=25 per variant for the real numbers.
 
-**A responsiveness/smoothness tradeoff worth noting:** the plan specifies
-replanning every 4 of the 8 predicted steps, which is what's used above. In
-side-by-side testing, committing to the *full* 8-step chunk before replanning
-(`--replan-every 8`) did better on this checkpoint (both variants under the
-30px bar), and temporal ensembling with `--replan-every 4` landed in between.
-With a still-imperfect model, more frequent replanning means more chances for
-chunk-to-chunk sampling noise to interrupt a committed push; a better-trained
-model would likely narrow this gap. Kept the plan's specified `replan_every=4`
-as the default rather than quietly switching to whatever scored best.
+**A responsiveness/smoothness tradeoff, originally left as the plan's
+specified default, later revisited:** the plan specifies replanning every 4
+of the 8 predicted steps, which the first version of this milestone used as
+the default. In side-by-side testing on that checkpoint, committing to the
+*full* 8-step chunk before replanning (`replan_every = chunk_size`) did
+better (both variants under the 30px bar) than either 4-step replanning or
+temporal ensembling. Original writeup here reasoned that a still-imperfect
+model made more frequent replanning more vulnerable to chunk-to-chunk
+sampling noise interrupting a committed push, and kept the plan's specified
+default rather than switching to whatever scored best on one checkpoint.
+That reasoning turned out right in a way that mattered: revisited during the
+[performance iteration](#performance-iteration-post-milestone-9) below, full-chunk
+commit is now the default, worth exactly the tradeoff described above rather
+than a workaround for an undertrained model.
 
 ## Milestone 7 — Evaluation harness + metrics
 
@@ -395,34 +449,35 @@ uv run python scripts/evaluate.py
 
 ```
 [push to the left target]  (25 rollouts)
-  success rate:              0.28
-  mean final dist:           85.2px
-  mean env coverage:         0.15
-  mean time-to-success:      111.4 steps
-  never reached target:      0.72
-  instruction-confusion rate: 0.08
+  success rate:              0.76
+  mean final dist:           28.6px
+  mean env coverage:         0.27
+  mean time-to-success:      150.3 steps
+  never reached target:      0.24
+  instruction-confusion rate: 0.00
 
 [push to the right target]  (25 rollouts)
-  success rate:              0.08
-  mean final dist:           95.1px
-  mean env coverage:         0.19
-  mean time-to-success:      163.8 steps
-  never reached target:      0.80
-  instruction-confusion rate: 0.20
+  success rate:              0.64
+  mean final dist:           29.3px
+  mean env coverage:         0.31
+  mean time-to-success:      148.8 steps
+  never reached target:      0.32
+  instruction-confusion rate: 0.00
 ```
 
 Full per-episode results in `assets/evaluation_results.json`.
 
-**Read this next to Milestone 6, not instead of it.** The single seeded
-rollouts there (16px / 48px final distance) were real, but one seed each is
-a demo, not a statistic — this N=25 harness is the real number, and it's
-considerably weaker: 28%/8% success. The confusion rate is the more
-encouraging piece of this: at 8% and 20%, most failures are the policy
-failing to land precisely on *either* target, not language conditioning
-routing the push to the wrong side — conditioning is doing its job even
-where low-level control isn't reliable yet. With a 200-episode dataset and
-a policy this size, this is a believable, honestly-reported result for a
-weekend-scoped project, not a solved task.
+**Read this next to Milestone 6, not instead of it** — one seed each there
+is a demo, not a statistic; this N=25 harness is the real number. The numbers
+above are current (post [performance iteration](#performance-iteration-post-milestone-9));
+the first version of this milestone reported a considerably weaker 28%/8%
+success (and 8%/20% instruction-confusion) on a 200-episode dataset with a
+smaller model — see that section for what changed and why. Even at that
+first, weaker pass, most failures were the policy failing to land precisely
+on *either* target rather than language conditioning routing the push to the
+wrong side — conditioning was already doing its job before low-level control
+caught up to it, and the improved run's 0%/0% confusion rate is that same
+signal, now cleaner.
 
 ## Milestone 8 — ROS2 wrapper (documented stub, not run)
 

@@ -20,7 +20,7 @@ from flow_policy.evaluation import evaluate_variant, summarize_episodes
 from flow_policy.rollout import load_policy_from_checkpoint
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
-DEFAULT_CHECKPOINT = REPO_ROOT / "checkpoints" / "policy_epoch10000.pt"
+DEFAULT_CHECKPOINT = REPO_ROOT / "checkpoints" / "policy_epoch8000.pt"
 DEFAULT_OUT_PATH = REPO_ROOT / "assets" / "evaluation_results.json"
 INSTRUCTIONS = [LEFT_TARGET.instruction, RIGHT_TARGET.instruction]
 
@@ -31,7 +31,7 @@ def main():
     parser.add_argument("--out-path", type=pathlib.Path, default=DEFAULT_OUT_PATH)
     parser.add_argument("--num-episodes", type=int, default=25)
     parser.add_argument("--seed-start", type=int, default=50_000)
-    parser.add_argument("--replan-every", type=int, default=4)
+    parser.add_argument("--replan-every", type=int, default=None, help="default: full chunk (chunk_size)")
     parser.add_argument("--n-euler-steps", type=int, default=10)
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()

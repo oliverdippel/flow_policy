@@ -23,7 +23,7 @@ from flow_policy.envs import POSITION_SUCCESS_RADIUS, TASK_VARIANTS, block_centr
 from flow_policy.expert import ScriptedPushTExpert
 
 DEFAULT_OUT_DIR = pathlib.Path(__file__).resolve().parent.parent / "data" / "episodes"
-EPISODES_PER_VARIANT = 100
+EPISODES_PER_VARIANT = 400
 MAX_STEPS = 300
 
 
@@ -67,6 +67,17 @@ def main():
     args = parser.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    stale = list(args.out_dir.glob("ep_*.npz"))
+    if stale:
+        # A prior run with a different --episodes-per-variant leaves orphaned files:
+        # episode_idx is assigned sequentially across both variants, so the same
+        # index can land on a different variant (and therefore a different filename)
+        # across runs, and old files silently pile up alongside new ones instead of
+        # being overwritten. Clear the slate so the directory always reflects exactly
+        # this run's episodes.
+        for path in stale:
+            path.unlink()
+        print(f"removed {len(stale)} stale episode file(s) from a previous run")
 
     summary = {}
     episode_idx = 0

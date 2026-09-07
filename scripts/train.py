@@ -40,6 +40,8 @@ def main():
     parser.add_argument("--chunk-size", type=int, default=8)
     parser.add_argument("--checkpoint-every", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--hidden-dim", type=int, default=512)
+    parser.add_argument("--num-hidden-layers", type=int, default=4)
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -50,7 +52,8 @@ def main():
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn, drop_last=True)
     print(f"dataset: {len(dataset)} episodes, {len(loader)} batches/epoch, batch_size={args.batch_size}")
 
-    policy = FlowMatchingPolicy(INSTRUCTIONS, chunk_size=args.chunk_size)
+    model_kwargs = {"hidden_dim": args.hidden_dim, "num_hidden_layers": args.num_hidden_layers}
+    policy = FlowMatchingPolicy(INSTRUCTIONS, chunk_size=args.chunk_size, **model_kwargs)
     optimizer = torch.optim.Adam(policy.parameters(), lr=args.lr)
     ema = EMA(policy, decay=0.999)
 
@@ -83,6 +86,7 @@ def main():
                     "model_state_dict": policy.state_dict(),
                     "ema_state_dict": ema.shadow,
                     "chunk_size": args.chunk_size,
+                    "model_kwargs": model_kwargs,
                 },
                 ckpt_path,
             )

@@ -1,9 +1,10 @@
 """Milestone 6: closed-loop rollout of the trained policy, both instructions.
 
 Runs the EMA-weights policy end-to-end in the environment via receding-
-horizon control (replan every 4 steps from an 8-step predicted chunk), for
-both task variants, saving a GIF per variant and logging whether each run
-reached its instructed target.
+horizon control (default: commit to the full predicted chunk before
+replanning -- see `flow_policy.rollout` for why this beat the plan's
+originally-specified 4-of-8-step replanning), for both task variants, saving
+a GIF per variant and logging whether each run reached its instructed target.
 """
 
 import argparse
@@ -16,7 +17,7 @@ from flow_policy.envs import LEFT_TARGET, POSITION_SUCCESS_RADIUS, RIGHT_TARGET
 from flow_policy.rollout import load_policy_from_checkpoint, run_rollout
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
-DEFAULT_CHECKPOINT = REPO_ROOT / "checkpoints" / "policy_epoch10000.pt"
+DEFAULT_CHECKPOINT = REPO_ROOT / "checkpoints" / "policy_epoch8000.pt"
 DEFAULT_OUT_DIR = REPO_ROOT / "assets"
 INSTRUCTIONS = [LEFT_TARGET.instruction, RIGHT_TARGET.instruction]
 
@@ -26,7 +27,7 @@ def main():
     parser.add_argument("--checkpoint", type=pathlib.Path, default=DEFAULT_CHECKPOINT)
     parser.add_argument("--out-dir", type=pathlib.Path, default=DEFAULT_OUT_DIR)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--replan-every", type=int, default=4)
+    parser.add_argument("--replan-every", type=int, default=None, help="default: full chunk (chunk_size)")
     parser.add_argument("--n-euler-steps", type=int, default=10)
     parser.add_argument("--temporal-ensemble", action="store_true")
     args = parser.parse_args()

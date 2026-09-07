@@ -30,7 +30,7 @@ from std_msgs.msg import Float32MultiArray, String
 from flow_policy.envs import LEFT_TARGET, RIGHT_TARGET
 from flow_policy.rollout import RecedingHorizonController, load_policy_from_checkpoint
 
-DEFAULT_CHECKPOINT = "checkpoints/policy_epoch10000.pt"
+DEFAULT_CHECKPOINT = "checkpoints/policy_epoch8000.pt"
 CONTROL_RATE_HZ = 10.0  # matches gym_pusht's control_hz
 
 
