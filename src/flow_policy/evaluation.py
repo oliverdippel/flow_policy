@@ -14,11 +14,12 @@ _SIDE_GOAL_POS = {
 }
 
 
-def classify_achieved_side(block_centroid: np.ndarray) -> str:
+def classify_achieved_side(block_pos: np.ndarray) -> str:
     """Which of the two fixed target positions the block ended up closer to,
-    independent of which one was instructed."""
-    dist_left = np.linalg.norm(block_centroid - _SIDE_GOAL_POS["left"])
-    dist_right = np.linalg.norm(block_centroid - _SIDE_GOAL_POS["right"])
+    independent of which one was instructed. `block_pos` is the raw block
+    origin (obs[2:4]), matching how goal positions are defined."""
+    dist_left = np.linalg.norm(block_pos - _SIDE_GOAL_POS["left"])
+    dist_right = np.linalg.norm(block_pos - _SIDE_GOAL_POS["right"])
     return "left" if dist_left < dist_right else "right"
 
 
@@ -34,7 +35,7 @@ def evaluate_variant(
     episodes = []
     for i in range(num_episodes):
         result = run_rollout(policy, variant, seed=seed_start + i, render=False, **rollout_kwargs)
-        achieved_side = classify_achieved_side(result.final_block_centroid)
+        achieved_side = classify_achieved_side(result.final_block_pos)
         episodes.append(
             {
                 "seed": seed_start + i,

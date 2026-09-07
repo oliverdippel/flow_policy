@@ -19,7 +19,7 @@ import pathlib
 
 import numpy as np
 
-from flow_policy.envs import POSITION_SUCCESS_RADIUS, TASK_VARIANTS, block_centroid_world, make_variant_env
+from flow_policy.envs import POSITION_SUCCESS_RADIUS, TASK_VARIANTS, make_variant_env
 from flow_policy.expert import ScriptedPushTExpert
 
 DEFAULT_OUT_DIR = pathlib.Path(__file__).resolve().parent.parent / "data" / "episodes"
@@ -43,8 +43,10 @@ def collect_episode(variant, seed, max_steps=MAX_STEPS):
             break
     env.close()
 
-    centroid = block_centroid_world(obs[2:4], obs[4])
-    final_dist = float(np.linalg.norm(centroid - variant.goal_pose[:2]))
+    # Origin-vs-goal_pos, matching gym_pusht's own coverage metric (which places the
+    # goal polygon's origin at goal_pos directly) -- not centroid-vs-goal_pos, which
+    # was a ~45px systematic offset from what actually determines coverage.
+    final_dist = float(np.linalg.norm(obs[2:4] - variant.goal_pose[:2]))
     position_success = final_dist <= POSITION_SUCCESS_RADIUS
 
     return {

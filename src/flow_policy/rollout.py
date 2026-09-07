@@ -27,7 +27,7 @@ import dataclasses
 import numpy as np
 import torch
 
-from flow_policy.envs import POSITION_SUCCESS_RADIUS, TaskVariant, block_centroid_world, make_variant_env
+from flow_policy.envs import POSITION_SUCCESS_RADIUS, TaskVariant, make_variant_env
 from flow_policy.policy import FlowMatchingPolicy
 
 
@@ -39,7 +39,7 @@ class RolloutResult:
     final_coverage: float
     env_is_success: bool
     position_success: bool
-    final_block_centroid: np.ndarray
+    final_block_pos: np.ndarray  # raw block origin (obs[2:4]), NOT centroid -- see position_success_radius note below
     first_success_step: int | None  # first t at which the block was within the success radius, if ever
 
 
@@ -114,8 +114,12 @@ def run_rollout(
         if render:
             frames.append(env.render())
 
-        centroid = block_centroid_world(obs[2:4], obs[4])
-        dist = float(np.linalg.norm(centroid - variant.goal_pose[:2]))
+        # NOTE: compared against goal_pos as the block's raw *origin* position (obs[2:4]),
+        # matching how gym_pusht's own coverage metric places the goal polygon -- at goal_pos
+        # directly, not at the block's centroid. An earlier version of this comparison used
+        # the centroid here, a ~45px systematic offset that silently capped achievable
+        # coverage; see README's rotation-blind-spot fix writeup.
+        dist = float(np.linalg.norm(obs[2:4] - variant.goal_pose[:2]))
         if first_success_step is None and dist <= position_success_radius:
             first_success_step = t
 
@@ -130,7 +134,7 @@ def run_rollout(
         final_coverage=float(info["coverage"]),
         env_is_success=bool(info["is_success"]),
         position_success=dist <= position_success_radius,
-        final_block_centroid=centroid,
+        final_block_pos=obs[2:4].copy(),
         first_success_step=first_success_step,
     )
 

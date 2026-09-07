@@ -18,8 +18,8 @@ demonstrations, entirely on CPU.
 | | |
 |---|---|
 | **Proof the flow-matching head works at all** | On a synthetic bimodal target (`x1 = +-2`), sampled points split ~45/54% across the true modes with 0.4% collapsed to the mean — the exact failure mode plain MSE regression has ([Milestone 4](#milestone-4--flow-matching-action-head)). |
-| **Real closed-loop rollouts** | Seeded spot-checks push the block to the correct target with visible, deliberate motion ([Milestone 6](#milestone-6--inference-ode-sampling--action-chunking)). |
-| **Real evaluation numbers (N=25/variant)** | Success 76% (left) / 64% (right); instruction-confusion 0% on both — see [Performance iteration](#performance-iteration-post-milestone-9) for how these numbers moved from an initial 28%/8%. |
+| **Real closed-loop rollouts** | Seeded spot-checks push the block with visible, deliberate motion, verified with multi-frame contact sheets, not just final frames ([Milestone 6](#milestone-6--inference-ode-sampling--action-chunking)). |
+| **Real evaluation numbers (N=25/variant)** | Success 0% (left) / 12% (right); instruction-confusion 0% on both; mean coverage ~0.32-0.35, in the same range as the scripted expert's own. These are corrected numbers — an earlier pass reported 76%/64% against a position metric with a real bug in it. See [Rotation fix + dataset-size ablation](#rotation-fix--dataset-size-ablation) for the full story, including why more data stopped helping around 400-800 episodes. |
 
 ![left target rollout](assets/rollout_push_to_the_left_target.gif)
 ![right target rollout](assets/rollout_push_to_the_right_target.gif)
@@ -66,16 +66,21 @@ uv run python scripts/evaluate.py           # M7: N=25/variant evaluation harnes
 
 ### What I'd do with more time or compute
 
-- **Fix the scripted expert's blind spot.** It only pushes toward the goal
-  *position* and never corrects the block's rotation, which is why this
-  project's whole success metric had to be redefined around position only
-  ([Milestone 1](#milestone-1--task-variants--scripted-expert--data-collection)).
-  A real rotate-then-translate controller (or just more scripted-expert
-  engineering time) would let the eval use PushT's actual 95%-coverage
-  criterion instead of a relaxed one — this is still true even after the
-  [performance iteration](#performance-iteration-post-milestone-9) below;
-  the env-native success rate is still 0% throughout, only this project's
-  position-only metric moved.
+- **A more precise expert, not just a rotation-aware one.** The rotate/
+  translate expert in [Rotation fix + dataset-size ablation](#rotation-fix--dataset-size-ablation)
+  gets the environment's real 95%-coverage criterion to ~4.7% -- a real
+  crack in a number that was a hard 0% all project, but its
+  phase-hysteresis makes its own actions non-Markovian, which measurably
+  hurt the policy trained on its demonstrations. A version without hidden
+  phase state (e.g. a single continuous control law that blends rotation
+  and translation correction as a function of the *current* state alone,
+  not a mode switch with memory) could plausibly transfer the coverage
+  improvement to the learned policy instead of just the expert.
+- **Given the dataset-size ablation came back flat (200-1600 episodes,
+  success 0.06-0.12 throughout, no trend), data volume is not the current
+  lever** -- the policy has converged to the expert's own precision
+  ceiling. A materially better expert or a different architecture/
+  observation space matters more now than collecting more of the same.
 - **Pixel observations + a real vision backbone.** The plan's low-dim-state
   path was the right first cut for a weekend, but a small CNN (or a frozen
   pretrained backbone) over the 96x96 RGB observation is the natural next
@@ -94,14 +99,15 @@ uv run python scripts/evaluate.py           # M7: N=25/variant evaluation harnes
   rather than a syntax-checked, never-executed stub.
 
 A scope note in the same spirit: the plan's own budget was ~800 lines of
-code total; this repo is at ~1520 (`src/flow_policy` + `scripts` +
+code total; this repo is at ~1610 (`src/flow_policy` + `scripts` +
 `ros2_nodes`), including a 9-way milestone split where each gets its own
 argparse-CLI script, and ~160 lines of never-executed ROS2 stub. The
 scripted expert itself went through several rewritten strategies while
-debugging Milestone 1 (see that section for why), but only the final,
-working version — 83 lines — is in the repo; the throwaway tuning scripts
-were deleted once they'd done their job. Noting the overage rather than
-quietly not mentioning it.
+debugging Milestone 1 and again in the rotation-fix follow-up (see those
+sections for why), but only the final, working version — 162 lines, now
+covering both the position-only and rotation-aware modes — is in the repo;
+the throwaway tuning scripts were deleted once they'd done their job. Noting
+the overage rather than quietly not mentioning it.
 
 ## Status
 
@@ -163,6 +169,144 @@ the scripted expert's inability to control the block's final *rotation*
 (Milestone 1), which is the actual gap between this project's relaxed
 success metric and PushT's real one.
 
+**Superseded, in part, by the next section.** Tackling that rotation gap
+turned up a real bug in the position-success metric itself (not just the
+expert) that was inflating every number above. The 76%/64% here was real
+relative to the metric it was measured against, but that metric turns out
+not to have been quite the right one. Read on.
+
+## Rotation fix + dataset-size ablation
+
+Two follow-up questions after the performance iteration above: could the
+scripted expert's rotation blind spot (Milestone 1) actually be fixed, and
+was 800 episodes enough, or would more data help further? Both
+investigations, done together, turned up something more important than
+either answer on its own.
+
+### The metric bug this surfaced
+
+Building a rotation-aware expert meant computing the block's true target
+pose precisely, which meant looking closely at exactly how `gym_pusht`
+places its goal polygon. It places the goal polygon's *origin* at
+`goal_pose[:2]` directly — the same raw origin the state observation
+reports (`obs[2:4]`), **not** the block's centroid. Every position-success
+number in this README up to this point (Milestones 1, 6, 7, and the
+performance iteration above) compared the block's **centroid** to
+`goal_pos` instead — a self-consistent yardstick (the expert aimed at the
+same point the metric measured against), but not the one that determines
+actual task success. Concretely, for one identical final state:
+
+```
+origin-based dist (correct, matches env coverage): 34.7px
+centroid-based dist (the old, inflated metric):     11.5px
+```
+
+That's a ~23px gap on a single state, and it isn't a fixed offset -- it
+varies with the block's rotation (the centroid sits ~45px from the origin,
+in a direction that rotates with the block), so it can't be corrected with
+a simple constant adjustment; it has to be fixed at the source. Fixed by
+comparing `obs[2:4]` to `goal_pos` directly everywhere a position-success
+number is computed (`collect_data.py`, `rollout.py`, `evaluation.py`), and
+by giving the scripted expert's translate phase the right aim point too
+(`goal_pos` shifted by the centroid offset, evaluated at *goal* angle, not
+left at `goal_pos` itself — see `flow_policy/expert.py`).
+
+This means every number reported earlier in this README understated how
+far the block actually was from the target. It doesn't mean the work done
+in Milestones 1-9 or the performance iteration was wrong -- the relative
+comparisons within each of those sections (before/after a specific change)
+remain valid, since the same yardstick was used on both sides of each one.
+It means the *absolute* numbers were more flattering than the real task.
+The numbers from here on use the corrected metric.
+
+### The rotation-aware expert: a genuine improvement that didn't transfer
+
+`flow_policy/expert.py` now alternates between two phases: **rotate** --
+push tangentially at the block's stem tip (~75px lever arm from the
+centroid) in whichever direction produces torque toward the goal angle
+(the push direction is always the goal-angle-error-signed +90-degree
+rotation of the centroid-to-tip direction, which analytically guarantees
+the correct torque sign regardless of current orientation) -- and
+**translate**, the original position-only strategy. A hysteresis band
+(switch to rotate above a 0.35 rad angle error, back to translate below
+0.05 rad) avoids flip-flopping at the boundary.
+
+Tuned and measured over N=150/variant: this expert nearly doubles mean
+coverage (0.44-0.49, vs. 0.29-0.32 for position-only) and achieves the
+environment's actual 95%-coverage success **~4.7% of the time** -- a real,
+reproducible crack in a number that had been a hard 0% for the entire
+project up to this point.
+
+Then the actual test: recollect the primary dataset with this expert,
+retrain the same policy architecture, re-evaluate. Result: **worse**, not
+better -- policy success dropped, confusion rate got worse, and the
+policy's own native-success rate stayed at 0% despite the expert's own
+occasional success. The likely cause, on inspection: the rotate/translate
+hysteresis makes the expert's action a function of *phase history*, not
+just the current `(obs, instruction)` -- right in the hysteresis band, the
+same visible state can produce either phase's action depending on which
+side the expert entered from, a hidden variable the policy never observes.
+That's textbook non-Markovian demonstration data, and behavior cloning
+degrades when the same visible state maps to conflicting target actions.
+This is a real, if unglamorous, finding: a scripted expert that performs
+better on the task is not automatically a better *data generator* for
+imitation learning if its own policy has hidden state the learner can't see.
+
+Given that, the rotation phase is implemented and available
+(`ScriptedExpertConfig(enable_rotation_phase=True)`) but **off by default**
+-- the primary dataset and checkpoint use position-only demonstrations,
+which is what the numbers throughout this README (post-metric-fix) reflect.
+
+### Dataset-size ablation: 200 / 400 / 800 / 1600 episodes
+
+Trained the same architecture on four dataset sizes, each for a *matched*
+~200,000 gradient steps (more episodes -> more batches/epoch -> fewer
+epochs needed, rather than confounding "more data" with "more compute"):
+
+| episodes | epochs | avg success rate | avg coverage |
+|---|---|---|---|
+| 200 | 33,333 | 0.08 | 0.32 |
+| 400 | 16,666 | 0.10 | 0.29 |
+| 800 | 8,000 | 0.06 | 0.34 |
+| 1600 | 4,000 | 0.12 | 0.29 |
+
+Flat. No dataset size in this range does meaningfully better than any
+other -- success rate bounces between 0.06 and 0.12 with no trend, and
+coverage sits in a tight 0.29-0.34 band throughout. **More data of this
+expert's quality is not the current bottleneck.** The tell: the scripted
+expert's own coverage (0.29-0.32 without rotation correction) is in the
+same range the trained policies land in -- the policy has essentially
+converged to imitating the expert's own precision ceiling, and no amount
+of additional demonstrations at that precision raises the ceiling. The
+lever that would actually move this number is a *better expert*
+(precision, not just task-completion rate) or a materially different
+architecture/observation space (pixels, a larger model) -- not more data
+collection at the current setup. Full per-size results:
+`assets/eval_ablation_{200,400,1600}.json` (800 is
+`assets/evaluation_results.json`, the primary checkpoint).
+
+### Where the primary checkpoint landed
+
+```
+[push to the left target]  (25 rollouts)
+  success rate:              0.00
+  mean final dist:           44.5px
+  mean env coverage:         0.35
+  instruction-confusion rate: 0.00
+
+[push to the right target]  (25 rollouts)
+  success rate:              0.12
+  mean final dist:           48.1px
+  mean env coverage:         0.32
+  instruction-confusion rate: 0.00
+```
+
+Weaker than the pre-metric-fix 76%/64%, and that's the honest number now.
+Confusion rate is still 0% on both -- conditioning routes the push
+correctly essentially always, even though precise landing on target is the
+harder, still-unsolved part. The rollout GIFs and `evaluation_results.json`
+linked at the top of this README are from this checkpoint.
+
 ## Milestone 0 — Environment setup
 
 Task/env: [`gym-pusht`](https://github.com/huggingface/gym-pusht) (PushT), installed via `uv`.
@@ -204,18 +348,21 @@ rotation through non-prehensile pushing is a genuinely hard control problem
 not a scripted controller) and is out of scope for a heuristic proportional
 controller. Since these two task variants only differ by goal *position*,
 this project measures the scripted expert's success by **position only**:
-block centroid within `POSITION_SUCCESS_RADIUS = 30px` of the goal position
-(`src/flow_policy/envs.py`), ignoring final rotation. The environment's
-native `coverage` and `is_success` are still recorded in every saved episode
-for reference.
+the block's raw origin (`obs[2:4]`, matching how `goal_pos` is defined --
+see [Rotation fix + dataset-size ablation](#rotation-fix--dataset-size-ablation)
+for a metric bug this project shipped for a while, comparing the block's
+*centroid* to `goal_pos` instead) within `POSITION_SUCCESS_RADIUS = 30px` of
+the goal position (`src/flow_policy/envs.py`), ignoring final rotation. The
+environment's native `coverage` and `is_success` are still recorded in every
+saved episode for reference.
 
 ```bash
 uv run python scripts/collect_data.py
 ```
 
 ```
-[push to the left target] 400 episodes -- position-success rate: 0.69 (radius=30.0px), mean env coverage: 0.32
-[push to the right target] 400 episodes -- position-success rate: 0.66 (radius=30.0px), mean env coverage: 0.29
+[push to the left target] 400 episodes -- position-success rate: 0.28 (radius=30.0px), mean env coverage: 0.34
+[push to the right target] 400 episodes -- position-success rate: 0.26 (radius=30.0px), mean env coverage: 0.34
 ```
 
 800 episodes (400/variant — bumped from 100/variant during the
@@ -236,6 +383,10 @@ drives straight through the centroid toward the goal. Circling first, rather
 than aiming straight at a "point behind the block," avoids cutting across the
 block from the wrong side and knocking it in a random direction — an earlier,
 naive version of this controller did exactly that and had a 0% success rate.
+A later rotation-aware version of this same expert is documented in
+[Rotation fix + dataset-size ablation](#rotation-fix--dataset-size-ablation) —
+it's a genuine capability improvement for the expert, but disabled by
+default because it measurably hurt the policy trained on its demonstrations.
 
 ## Milestone 2 — Dataset + dataloader
 
@@ -404,8 +555,8 @@ uv run python scripts/rollout.py
 ```
 
 ```
-[push to the left target] position_success=True (dist=5.8px) env_coverage=0.34
-[push to the right target] position_success=True (dist=11.8px) env_coverage=0.49
+[push to the left target] position_success=False (dist=38.7px) env_coverage=0.39
+[push to the right target] position_success=False (dist=47.3px) env_coverage=0.37
 ```
 
 ![left target rollout](assets/rollout_push_to_the_left_target.gif)
@@ -414,8 +565,12 @@ uv run python scripts/rollout.py
 Both rollouts show real, deliberate pushing (confirmed by inspecting frames
 across the episode, not just the final one) — the agent circles to the far
 side of the block and drives it toward the correct target, not a coincidence
-of where the block happened to spawn. One seed each is a spot-check, not a
-statistic — Milestone 7 runs N=25 per variant for the real numbers.
+of where the block happened to spawn — just short of this project's 30px bar
+on this particular seed, with coverage in the high-0.3s (numbers here are
+post-metric-fix; see [Rotation fix + dataset-size ablation](#rotation-fix--dataset-size-ablation)
+for what changed and why these are lower than an earlier pass reported). One
+seed each is a spot-check, not a statistic — Milestone 7 runs N=25 per
+variant for the real numbers.
 
 **A responsiveness/smoothness tradeoff, originally left as the plan's
 specified default, later revisited:** the plan specifies replanning every 4
@@ -449,35 +604,38 @@ uv run python scripts/evaluate.py
 
 ```
 [push to the left target]  (25 rollouts)
-  success rate:              0.76
-  mean final dist:           28.6px
-  mean env coverage:         0.27
-  mean time-to-success:      150.3 steps
-  never reached target:      0.24
+  success rate:              0.00
+  mean final dist:           44.5px
+  mean env coverage:         0.35
+  mean time-to-success:      131.1 steps
+  never reached target:      0.72
   instruction-confusion rate: 0.00
 
 [push to the right target]  (25 rollouts)
-  success rate:              0.64
-  mean final dist:           29.3px
-  mean env coverage:         0.31
-  mean time-to-success:      148.8 steps
-  never reached target:      0.32
+  success rate:              0.12
+  mean final dist:           48.1px
+  mean env coverage:         0.32
+  mean time-to-success:      171.4 steps
+  never reached target:      0.60
   instruction-confusion rate: 0.00
 ```
 
 Full per-episode results in `assets/evaluation_results.json`.
 
 **Read this next to Milestone 6, not instead of it** — one seed each there
-is a demo, not a statistic; this N=25 harness is the real number. The numbers
-above are current (post [performance iteration](#performance-iteration-post-milestone-9));
-the first version of this milestone reported a considerably weaker 28%/8%
-success (and 8%/20% instruction-confusion) on a 200-episode dataset with a
-smaller model — see that section for what changed and why. Even at that
-first, weaker pass, most failures were the policy failing to land precisely
-on *either* target rather than language conditioning routing the push to the
-wrong side — conditioning was already doing its job before low-level control
-caught up to it, and the improved run's 0%/0% confusion rate is that same
-signal, now cleaner.
+is a demo, not a statistic; this N=25 harness is the real number. This
+milestone's numbers moved twice after first being reported: up to 76%/64%
+during the [performance iteration](#performance-iteration-post-milestone-9)
+(more data, a bigger model, a better replan default), then back down to the
+0%/12% above once [a real bug in the position-success metric itself](#rotation-fix--dataset-size-ablation)
+was found and fixed -- the metric had been comparing the block's centroid to
+the goal position instead of its actual origin, which is what the
+environment itself uses. What hasn't moved across any of these three passes:
+instruction-confusion has stayed at or near 0% throughout, including the
+very first, weakest pass (which was 8%/20%, not 0%, but still mostly
+"missed the target" rather than "pushed to the wrong side"). Conditioning
+routing the push correctly is the one claim in this project that's held up
+under every revision.
 
 ## Milestone 8 — ROS2 wrapper (documented stub, not run)
 
