@@ -92,17 +92,29 @@ uv run python scripts/evaluate.py           # M7: N=25/variant evaluation harnes
   ~0% (position-only expert) to 3-9% (continuous-blend expert) — small, but
   a real regression worth understanding rather than shrugging off, since it
   didn't exist before this round of changes.
+- **A genuinely different approach to consistent 95% coverage**, not another
+  patch on the CEM search in
+  [MPC expert](#mpc-expert-an-attempt-at-consistent-95-coverage-negative-result).
+  That investigation's real conclusion: finite-horizon greedy search can find
+  a trajectory that's better over its own lookahead window and worse over the
+  rest of the episode, and no amount of bug-fixing the search *around* that
+  problem fixed the problem itself. A shaped value function accounting for
+  what happens after the horizon, or substantially more search budget than
+  tested, are the two untried directions that could actually address it.
 - **Actually run the Milestone 8 ROS2 nodes** against a real ROS2 install
   rather than a syntax-checked, never-executed stub.
 
 A scope note in the same spirit: the plan's own budget was ~800 lines of
-code total; this repo is at ~1620 (`src/flow_policy` + `scripts` +
+code total; this repo is at ~1890 (`src/flow_policy` + `scripts` +
 `ros2_nodes`), including a 9-way milestone split where each gets its own
-argparse-CLI script, and ~160 lines of never-executed ROS2 stub. The
-scripted expert itself went through several rewritten strategies while
-debugging Milestone 1 and again in the rotation-fix follow-up (see those
-sections for why), but only the final, working version — 175 lines, now
-covering the position-only, hysteresis, and continuous-blend modes — is in
+argparse-CLI script, ~160 lines of never-executed ROS2 stub, and ~270 lines
+for the MPC expert -- real, working infrastructure whose actual conclusion
+was negative (see that section), kept in the repo rather than deleted
+because the failure mode it documents is worth more than the line count it
+costs. The scripted expert itself went through several rewritten strategies
+while debugging Milestone 1 and again in the rotation-fix follow-up (see
+those sections for why), but only the final, working version — 175 lines,
+now covering the position-only, hysteresis, and continuous-blend modes — is in
 the repo; the throwaway tuning scripts were deleted once they'd done their
 job. Noting the overage rather than quietly not mentioning it.
 
@@ -368,6 +380,97 @@ time (91-97%), even though precise landing on target and matching rotation
 are both still the harder, unsolved parts. The rollout GIFs and
 `evaluation_results.json` linked at the top of this README are from this
 checkpoint (continuous-blend, N=100).
+
+## MPC expert: an attempt at consistent 95% coverage (negative result)
+
+Explicit goal for this round: get the *trained policy* to consistently hit
+PushT's real 95%-coverage success criterion, not this project's relaxed
+position-only one. First diagnostic, before writing any new code: none of
+the existing experts reliably hit that bar themselves (position-only ~0%,
+hysteresis ~4.7%, continuous-blend ~0%) -- and behavior cloning can't
+exceed what its demonstrations show it. Fixing the policy has to start with
+building a demonstrator that's actually reliable, so this section is about
+`src/flow_policy/mpc_expert.py`, a sampling-based model-predictive-control
+expert built to be that demonstrator. It didn't get there. Written up in
+full because the failure mode is more informative than a one-line "didn't
+work," and because most of the debugging here is legitimate, reusable
+infrastructure even though the end result is negative.
+
+**The idea**: instead of a hand-designed control law, directly optimize
+against the real objective. Every planning step, sample many candidate
+short action sequences, simulate each forward using the *actual physics
+engine* (not an approximation), score by the resulting real coverage, keep
+the best. This is cross-entropy-method (CEM) trajectory search, and it
+needed a piece none of the previous experts did: a way to clone the full
+physics state -- not just the 5-dim observation, which drops velocity
+entirely -- into a separate "shadow" environment for forward simulation
+without touching the real one.
+
+**Validating that foundation surfaced a real, subtle bug first.** The
+naive clone (copy `.position` then `.angle` onto the shadow's bodies)
+silently desynced from the real trajectory. Cause: pymunk rotates a body
+around its `center_of_gravity` when `.angle` is set, and the block's CoG
+isn't at its origin -- so setting `.angle` after `.position` moves
+`.position` again as a side effect. `gym_pusht`'s own `_set_state` has this
+exact same ordering bug, and its authors know it (there's a comment
+acknowledging it, tolerated because their use case doesn't need exact
+reproduction). Fixed by setting angle first. Verified after the fix:
+reproduces a live trajectory exactly under free motion, and within ~0.05px
+under active contact.
+
+**Then real, iterative debugging that never converged:**
+
+1. Scoring on raw coverage alone: flat, zero gradient until the block
+   already overlaps the goal, so CEM had nothing to select on early.
+   Fixed with dense position/angle-error penalties.
+2. A bigger search budget (more candidates, more iterations, longer
+   horizon) didn't help -- ruled out "just needs more compute."
+3. A longer-horizon, staged search (mid-horizon angle-error penalty,
+   seeded from the hysteresis heuristic instead of continuous-blend) --
+   while testing this, caught a second real bug: CEM was sampling from
+   numpy's *unseeded global* random state, so an identical episode seed
+   produced wildly different outcomes (0.0 vs 0.82 coverage) run to run.
+   Fixed with an explicit, seeded RNG.
+4. With reproducible seeding, ~40% of episodes still scored exactly 0.0.
+   Traced one down to a third real bug: a fresh hysteresis instance was
+   being created every planning cycle, resetting its rotate/translate
+   phase memory each time -- defeating the entire point of hysteresis
+   (finish rotating before switching back). Fixed by persisting one
+   instance across planning calls, and by executing a full planned horizon
+   before replanning (rather than a prefix of it) so the persisted
+   heuristic's internal phase stays in lockstep with what actually
+   happened physically, not a discarded hypothetical tail.
+5. Even after all of that, the same seed was still stuck -- traced further
+   and found the real, structural limitation: CEM accepted a candidate
+   that scored a genuine 0.05+ improvement *within its 16-step lookahead*,
+   and that locally-better choice left the agent circling without ever
+   re-approaching the block for the rest of a 300-step episode. Added a
+   minimum-improvement gate (a candidate must clear the nominal by a real
+   margin, not any positive epsilon) to filter out marginal/noisy
+   "improvements" -- this addressed the wrong failure mode. The
+   0.05-improvement case that stayed broken wasn't noise; finite-horizon
+   greedy search can find a trajectory that's genuinely better over the
+   next 16 steps and genuinely worse over the rest of the episode, and
+   nothing implemented here accounts for that.
+
+**Net result, N=12 episodes/variant**: mean coverage ~0.11-0.17 -- worse
+than continuous-blend alone (~0.3-0.4) and worse than an earlier, less-
+fixed version of this same search. Each fix was correctly diagnosed and
+independently justified; the aggregate outcome got worse anyway, because
+each one addressed a real bug without addressing the deeper one (a greedy,
+finite-horizon search can't see past its own lookahead window). That
+combination -- confirmed individual fixes, unconfirmed aggregate progress
+-- is why this stopped here rather than continuing to iterate: the
+signal that further patching would converge wasn't there anymore.
+
+**Status**: `mpc_expert.py` is real, working infrastructure (the state-
+cloning is correct and validated; the CEM loop runs and is reproducible)
+but not a reliable expert. It is not wired into data collection and isn't
+used by default anywhere. A genuine next step would need to look
+qualitatively different from what's here -- a shaped value function that
+accounts for what happens after the planning horizon rather than scoring
+the lookahead window alone, or a much larger search budget than tested --
+not another safeguard bolted onto this same short-horizon design.
 
 ## Milestone 0 — Environment setup
 
